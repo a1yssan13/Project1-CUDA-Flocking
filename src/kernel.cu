@@ -230,7 +230,7 @@ void Boids::copyBoidsToVBO(float *vbodptr_positions, float *vbodptr_velocities) 
 * in the `pos` and `vel` arrays.
 */
 __device__ glm::vec3 computeVelocityChange(int N, int iSelf, const glm::vec3 *pos, const glm::vec3 *vel) {
-    glm::vec3 newVelocity = glm::vec3(0.0f, 0.0f, 0.0f);
+    glm::vec3 newVelocity = vel[iSelf];
     glm::vec3 perceivedCenter = glm::vec3(0.0f, 0.0f, 0.0f); 
     glm::vec3 perceivedVelocity = glm::vec3(0.0f, 0.0f, 0.0f);
     glm::vec3 c = glm::vec3(0.0f, 0.0f, 0.0f);
@@ -396,6 +396,11 @@ __global__ void kernUpdateVelNeighborSearchCoherent(
 */
 void Boids::stepSimulationNaive(float dt) {
   // TODO-1.2 - use the kernels you wrote to step the simulation forward in time.
+   dim3 fullBlocksPerGrid((numObjects + blockSize - 1) / blockSize);
+
+   kernUpdateVelocityBruteForce << <fullBlocksPerGrid, blockSize >> > (numObjects, dev_pos, dev_vel1, dev_vel2);
+   kernUpdatePos << <fullBlocksPerGrid, blockSize >> > (numObjects, dt, dev_pos, dev_vel2); 
+   std::swap(dev_vel1, dev_vel2); 
   // TODO-1.2 ping-pong the velocity buffers
 }
 
