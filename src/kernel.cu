@@ -413,13 +413,14 @@ __global__ void kernUpdateVelNeighborSearchScattered(
   glm::ivec3 gridPos = positionToGridIndex3D(currPos - gridMin, inverseCellWidth);
   // - Identify which cells may contain neighbors. This isn't always 8.
 
-  glm::ivec3 neighborDirection = glm::sign(currPos - gridMin - (glm::vec3(gridPos) * cellWidth) - 0.5f * cellWidth);
+  glm::ivec3 neighborDirection = glm::sign((currPos - gridMin) * inverseCellWidth - glm::vec3(gridPos) - 0.5f);
   glm::ivec3 neighborGridPos = glm::clamp(neighborDirection + gridPos, glm::ivec3(0), glm::ivec3(gridResolution - 1));
 
-  printf("neighborGridPos: (%d, %d, %d) \n", neighborGridPos.x, neighborGridPos.y, neighborGridPos.z);
+  //printf("neighborGridPos: (%d, %d, %d) \n", neighborGridPos.x, neighborGridPos.y, neighborGridPos.z);
 
   glm::ivec3 minGrid = glm::min(gridPos, neighborGridPos); 
   glm::ivec3 maxGrid = glm::max(gridPos, neighborGridPos); 
+  //printf("minGrid, maxGrid: (%d, %d, %d) : (%d, %d, %d) \n", minGrid.x, minGrid.y, minGrid.z, maxGrid.x, maxGrid.y, maxGrid.z);
 
   glm::vec3 perceivedCenter = glm::vec3(0.0f, 0.0f, 0.0f);
   glm::vec3 perceivedVelocity = glm::vec3(0.0f, 0.0f, 0.0f);
@@ -459,26 +460,26 @@ __global__ void kernUpdateVelNeighborSearchScattered(
               // given neighbor grid position, we can update the velocity vectors. 
           }
       }
-      if (neighborCount1 > 0) {
-          perceivedCenter /= neighborCount1;
-          velocity += (perceivedCenter - currPos) * rule1Scale;
-      }
-      // Rule 2: boids try to stay a distance d away from each other
-      velocity += c * rule2Scale;
-      // Rule 3: boids try to match the speed of surrounding boids
-      if (neighborCount3 > 0) {
-          perceivedVelocity /= neighborCount3;
-          velocity += perceivedVelocity * rule3Scale;
-      }
-
-      float speed = glm::length(velocity);
-
-      // Clamp the speed change before putting the new speed in vel2
-      if (speed > maxSpeed) {
-          velocity = glm::normalize(velocity) * maxSpeed;
-      }
-      vel2[index] = velocity;
   }
+  if (neighborCount1 > 0) {
+      perceivedCenter /= neighborCount1;
+      velocity += (perceivedCenter - currPos) * rule1Scale;
+  }
+  // Rule 2: boids try to stay a distance d away from each other
+  velocity += c * rule2Scale;
+  // Rule 3: boids try to match the speed of surrounding boids
+  if (neighborCount3 > 0) {
+      perceivedVelocity /= neighborCount3;
+      velocity += perceivedVelocity * rule3Scale;
+  }
+
+  float speed = glm::length(velocity);
+
+  // Clamp the speed change before putting the new speed in vel2
+  if (speed > maxSpeed) {
+      velocity = glm::normalize(velocity) * maxSpeed;
+  }
+  vel2[index] = velocity;
 }
 
 __global__ void kernUpdateVelNeighborSearchCoherent(
