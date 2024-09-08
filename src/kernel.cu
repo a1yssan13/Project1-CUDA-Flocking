@@ -383,14 +383,14 @@ __global__ void kernIdentifyCellStartEnd(int N, int *particleGridIndices,
     if (index >= N) {
         return;
     }
-    int prevIndex = particleGridIndices[imin(0, index - 1)]; //Grid Index of previous array 
-    int nextIndex = particleGridIndices[imax(index + 1, N - 1)];
+    int prevIndex = particleGridIndices[imax(0, index - 1)]; //Grid Index of previous array 
+    int nextIndex = particleGridIndices[imin(index + 1, N - 1)];
     int currIndex = particleGridIndices[index];
     if (prevIndex != currIndex || currIndex == 0) {
-        dev_gridCellStartIndices[currIndex] = index; 
+        gridCellStartIndices[currIndex] = index;
     }
     if (currIndex != nextIndex || currIndex == N - 1) {
-        dev_gridCellEndIndices[currIndex] = index + 1; 
+        gridCellEndIndices[currIndex] = index + 1;
     }
 }
 
@@ -408,14 +408,15 @@ __global__ void kernUpdateVelNeighborSearchScattered(
     return;
   }
   // - Identify the grid cell that this particle is in
-  int arrayIndex = particleArrayIndices[index]; 
-  glm::vec3 velocity = vel1[arrayIndex]; 
-  glm::vec3 currPos = pos[arrayIndex];
-  glm::ivec3 gridPos = positionToGridIndex3D(currPos - gridMin, gridResolution);
+  glm::vec3 velocity = vel1[index]; 
+  glm::vec3 currPos = pos[index];
+  glm::ivec3 gridPos = positionToGridIndex3D(currPos - gridMin, inverseCellWidth);
   // - Identify which cells may contain neighbors. This isn't always 8.
 
-  glm::ivec3 neighborDirection = glm::sign(currPos - (glm::vec3(gridPos) * cellWidth));
+  glm::ivec3 neighborDirection = glm::sign(currPos - gridMin - (glm::vec3(gridPos) * cellWidth) - 0.5f * cellWidth);
   glm::ivec3 neighborGridPos = glm::clamp(neighborDirection + gridPos, glm::ivec3(0), glm::ivec3(gridResolution - 1));
+
+  printf("neighborGridPos: (%d, %d, %d) \n", neighborGridPos.x, neighborGridPos.y, neighborGridPos.z);
 
   glm::ivec3 minGrid = glm::min(gridPos, neighborGridPos); 
   glm::ivec3 maxGrid = glm::max(gridPos, neighborGridPos); 
@@ -427,8 +428,8 @@ __global__ void kernUpdateVelNeighborSearchScattered(
   int neighborCount3 = 0;
 
   for (int i = minGrid.x; i <= maxGrid.x; i++) {
-      for (int j = minGrid.y; j < maxGrid.y; j++) {
-          for (int k = minGrid.z; k < maxGrid.z; k++) {
+      for (int j = minGrid.y; j <= maxGrid.y; j++) {
+          for (int k = minGrid.z; k <= maxGrid.z; k++) {
               int neighborGridIdx1D = gridIndex3Dto1D(i, j, k, gridResolution);
               // - For each cell, read the start/end indices in the boid pointer array.
               int start = gridCellStartIndices[neighborGridIdx1D];
@@ -438,7 +439,7 @@ __global__ void kernUpdateVelNeighborSearchScattered(
               //   the boids rules, if this boid is within the neighborhood distance.
               for (int s = start; s < end; s++) {
                   int neighborArrayIdx = particleArrayIndices[s]; 
-                  if (arrayIndex == neighborArrayIdx) continue;
+                  if (index == neighborArrayIdx) continue;
                   glm::vec3 thatBoidPos = pos[neighborArrayIdx];
                   glm::vec3 thatBoidVelocity = vel1[neighborArrayIdx];
 
@@ -513,7 +514,16 @@ void Boids::stepSimulationNaive(float dt) {
 void Boids::stepSimulationScatteredGrid(float dt) {
   // Uniform Grid Neighbor search using Thrust sort.
   dim3 fullBlocksPerGrid((numObjects + blockSize - 1) / blockSize);
-  kernComputeIndices << <fullBlocksPerGrid, blockSize >> > (numObjects, gridSideCount, gridMinimum, gridInverseCellWidth, dev_pos, dev_particleArrayIndices, dev_particleGridIndices)
+  dim3 blocksPerGridCell((gridCellCount + blockSize - 1) / blockSize); 
+
+  kernComputeIndices << <fullBlocksPerGrid, blockSize >> > (numObjects, gridSideCount, gridMinimum, gridInverseCellWidth, dev_pos, dev_particleArrayIndices, dev_particleGridIndices);
+  // Wrap device vectors in thrust iterators for use with thrust.
+  
+  thrust::device_ptr<int> dev_thrust_keys(dev_particleGridIndices);
+  thrust::device_ptr<int> dev_thrust_values(dev_particleArrayIndices);
+  // LOOK-2.1 Example for using thrust::sort_by_key
+  thrust::sort_by_key(dev_thrust_keys, dev_thrust_keys + numObjects, dev_thrust_values);
+
       // In Parallel:
       // - label each particle with its array index as well as its grid index.
       //   Use 2x width grids.
@@ -521,16 +531,16 @@ void Boids::stepSimulationScatteredGrid(float dt) {
       //   are welcome to do a performance comparison.
       // - Naively unroll the loop for finding the start and end indices of each
       //   cell's data pointers in the array of boid indices
-  kernIdentifyCellStartEnd << <fullBlocksPerGrid, blockSize >> > (numObjects, dev_particleGridIndices, gridCellStartIndices, gridCellEndIndices); 
-  kernUpdateVelNeighborSearchScattered(
-      numObjects, int gridResolution, glm::vec3 gridMin,
-      float inverseCellWidth, float cellWidth,
-      int* gridCellStartIndices, int* gridCellEndIndices,
-      int* particleArrayIndices,
-      glm::vec3 * pos, glm::vec3 * vel1, glm::vec3 * vel2)
-  // - Perform velocity updates using neighbor search
-  // - Update positions
-  // - Ping-pong buffers as needed
+  kernResetIntBuffer << <blocksPerGridCell, blockSize >> > (gridCellCount, dev_gridCellStartIndices, -1); 
+  kernResetIntBuffer << <blocksPerGridCell, blockSize >> > (gridCellCount, dev_gridCellEndIndices, -1);
+  kernIdentifyCellStartEnd << <fullBlocksPerGrid, blockSize >> > (numObjects, dev_particleGridIndices, dev_gridCellStartIndices, dev_gridCellEndIndices); 
+  kernUpdateVelNeighborSearchScattered << <blocksPerGridCell, blockSize >> > (
+      numObjects, gridSideCount, gridMinimum,
+      gridInverseCellWidth, gridCellWidth,
+      dev_gridCellStartIndices,
+      dev_gridCellEndIndices,
+      dev_particleArrayIndices,
+      dev_pos, dev_vel1, dev_vel2); 
   kernUpdatePos << <fullBlocksPerGrid, blockSize >> > (numObjects, dt, dev_pos, dev_vel2);
   std::swap(dev_vel1, dev_vel2);
 }
@@ -559,6 +569,10 @@ void Boids::endSimulation() {
   cudaFree(dev_pos);
 
   // TODO-2.1 TODO-2.3 - Free any additional buffers here.
+  cudaFree(dev_particleArrayIndices); 
+  cudaFree(dev_particleGridIndices); 
+  cudaFree(dev_gridCellEndIndices); 
+  cudaFree(dev_gridCellStartIndices); 
 }
 
 void Boids::unitTest() {
