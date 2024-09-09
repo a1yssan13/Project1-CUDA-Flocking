@@ -72,6 +72,8 @@ glm::vec3 *dev_vel2;
 
 // LOOK-2.1 - these are NOT allocated for you. You'll have to set up the thrust
 // pointers on your own too.
+glm::vec3* dev_pos_re;
+glm::vec3* dev_vel_re;
 
 // For efficient sorting and the uniform grid. These should always be parallel.
 int *dev_particleArrayIndices; // What index in dev_pos and dev_velX represents this particle?
@@ -169,11 +171,20 @@ void Boids::initSimulation(int N) {
   gridMinimum.z -= halfGridWidth;
 
   // TODO-2.1 TODO-2.3 - Allocate additional buffers here.
+  cudaMalloc((void**)&dev_pos_re, N * sizeof(glm::vec3));
+  checkCUDAErrorWithLine("cudaMalloc dev_pos_re failed!");
+
+  cudaMalloc((void**)&dev_vel_re, N * sizeof(glm::vec3));
+  checkCUDAErrorWithLine("cudaMalloc dev_vel_re failed!");
 
   cudaMalloc((void**)&dev_particleArrayIndices, N * sizeof(int));
+  checkCUDAErrorWithLine("cudaMalloc dev_particleArrayIndices failed!");
   cudaMalloc((void**)&dev_particleGridIndices, N * sizeof(int));
+  checkCUDAErrorWithLine("cudaMalloc dev_particleGridIndices failed!");
   cudaMalloc((void**)&dev_gridCellStartIndices, gridCellCount * sizeof(int));
+  checkCUDAErrorWithLine("cudaMalloc dev_gridCellStartIndices failed!");
   cudaMalloc((void**)&dev_gridCellEndIndices, gridCellCount * sizeof(int));
+  checkCUDAErrorWithLine("cudaMalloc dev_gridCellEndIndices failed!");
 
   cudaDeviceSynchronize();
 }
@@ -483,6 +494,15 @@ __global__ void kernUpdateVelNeighborSearchScattered(
   vel2[index] = velocity;
 }
 
+__global__ void kernRearrangeVector(int N, glm::vec3 *og_pos, glm::vec3 *og_vel, glm::vec3 *new_pos, glm::vec3 *new_vel, int *particleArrayIndices) {
+    int index = threadIdx.x + (blockIdx.x * blockDim.x);
+    if (index >= N) {
+        return;
+    }
+    new_vel[index] = og_vel[particleArrayIndices[index]];
+    new_pos[index] = og_pos[particleArrayIndices[index]];
+}
+
 __global__ void kernUpdateVelNeighborSearchCoherent(
   int N, int gridResolution, glm::vec3 gridMin,
   float inverseCellWidth, float cellWidth,
@@ -566,17 +586,6 @@ __global__ void kernUpdateVelNeighborSearchCoherent(
       velocity = glm::normalize(velocity) * maxSpeed;
   }
   vel2[index] = velocity;
-
-  // This should expect gridCellStartIndices and gridCellEndIndices to refer
-  // directly to pos and vel1.
-  // - Identify the grid cell that this particle is in
-  // - Identify which cells may contain neighbors. This isn't always 8.
-  // - For each cell, read the start/end indices in the boid pointer array.
-  //   DIFFERENCE: For best results, consider what order the cells should be
-  //   checked in to maximize the memory benefits of reordering the boids data.
-  // - Access each boid in the cell and compute velocity change from
-  //   the boids rules, if this boid is within the neighborhood distance.
-  // - Clamp the speed change before putting the new speed in vel2
 }
 
 /**
@@ -645,12 +654,18 @@ void Boids::stepSimulationCoherentGrid(float dt) {
   // - Naively unroll the loop for finding the start and end indices of each
   //   cell's data pointers in the array of boid indices
   // - BIG DIFFERENCE: use the rearranged array index buffer to reshuffle all
-  // Use dev_particleArray
-  //   the particle data in the simulation array.
-  //   CONSIDER WHAT ADDITIONAL BUFFERS YOU NEED
-  // - Perform velocity updates using neighbor search
-  // - Update positions
-  // - Ping-pong buffers as needed. THIS MAY BE DIFFERENT FROM BEFORE.
+  kernRearrangeVector << <fullBlocksPerGrid, blockSize >> > (numObjects, dev_pos, dev_vel1, dev_pos_re, dev_vel_re, dev_particleArrayIndices);
+  std::swap(dev_pos, dev_pos_re);
+  kernUpdateVelNeighborSearchCoherent << <blocksPerGridCell, blockSize >> > (
+      numObjects, gridSideCount, gridMinimum,
+      gridInverseCellWidth, gridCellWidth,
+      dev_gridCellStartIndices,
+      dev_gridCellEndIndices,
+      dev_pos, dev_vel_re, dev_vel2);
+  
+  kernUpdatePos << <fullBlocksPerGrid, blockSize >> > (numObjects, dt, dev_pos, dev_vel2);
+  // Entirely change all positions to account for switch. 
+  std::swap(dev_vel1, dev_vel2);  
 }
 
 void Boids::endSimulation() {
@@ -659,6 +674,8 @@ void Boids::endSimulation() {
   cudaFree(dev_pos);
 
   // TODO-2.1 TODO-2.3 - Free any additional buffers here.
+  cudaFree(dev_vel_re);
+  cudaFree(dev_pos_re);
   cudaFree(dev_particleArrayIndices); 
   cudaFree(dev_particleGridIndices); 
   cudaFree(dev_gridCellEndIndices); 
