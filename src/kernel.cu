@@ -469,10 +469,10 @@ __global__ void kernUpdateVelNeighborSearchScattered(
                       neighborCount3++;
                   }
               }
-              // given neighbor grid position, we can update the velocity vectors. 
           }
       }
   }
+  // Rule 1
   if (neighborCount1 > 0) {
       perceivedCenter /= neighborCount1;
       velocity += (perceivedCenter - currPos) * rule1Scale;
@@ -634,7 +634,6 @@ void Boids::stepSimulationScatteredGrid(float dt) {
 }
 
 void Boids::stepSimulationCoherentGrid(float dt) {
-  // TODO-2.3 - start by copying Boids::stepSimulationNaiveGrid
   // Uniform Grid Neighbor search using Thrust sort on cell-coherent data.
   dim3 fullBlocksPerGrid((numObjects + blockSize - 1) / blockSize);
   dim3 blocksPerGridCell((gridCellCount + blockSize - 1) / blockSize);
@@ -653,18 +652,16 @@ void Boids::stepSimulationCoherentGrid(float dt) {
   kernIdentifyCellStartEnd << <fullBlocksPerGrid, blockSize >> > (numObjects, dev_particleGridIndices, dev_gridCellStartIndices, dev_gridCellEndIndices);
   // - Naively unroll the loop for finding the start and end indices of each
   //   cell's data pointers in the array of boid indices
-  // - BIG DIFFERENCE: use the rearranged array index buffer to reshuffle all
   kernRearrangeVector << <fullBlocksPerGrid, blockSize >> > (numObjects, dev_pos, dev_vel1, dev_pos_re, dev_vel_re, dev_particleArrayIndices);
-  std::swap(dev_pos, dev_pos_re);
+  std::swap(dev_pos, dev_pos_re); // we do not need previous position vectors. 
   kernUpdateVelNeighborSearchCoherent << <blocksPerGridCell, blockSize >> > (
       numObjects, gridSideCount, gridMinimum,
       gridInverseCellWidth, gridCellWidth,
       dev_gridCellStartIndices,
       dev_gridCellEndIndices,
       dev_pos, dev_vel_re, dev_vel2);
-  
+  // Update positions
   kernUpdatePos << <fullBlocksPerGrid, blockSize >> > (numObjects, dt, dev_pos, dev_vel2);
-  // Entirely change all positions to account for switch. 
   std::swap(dev_vel1, dev_vel2);  
 }
 
